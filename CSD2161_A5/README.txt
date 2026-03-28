@@ -8,8 +8,11 @@ A client-server online stock trading system over TCP/LAN. Multiple clients can
 connect simultaneously to buy/sell stocks from a shared market. All state is
 server-authoritative with persistent storage.
 
-Matching Model: Market-maker quotes (fixed bid/ask prices per stock).
-Stocks have a fixed unit price set in Stocks.txt. Clients buy/sell at that price.
+Matching Model: Market-maker quotes with bid/ask spread.
+  - Ask price: the price clients pay when BUYING.
+  - Bid price: the price clients receive when SELLING.
+  - Prices move dynamically: buying pushes prices up by $1, selling pushes
+    prices down by $1 (minimum $1).
 
 
 BUILD
@@ -17,6 +20,9 @@ BUILD
 - Open CSD2161_A5.sln in Visual Studio 2022
 - Build in Release mode, x64 platform
 - Outputs: x64/Release/Server.exe, x64/Release/Client.exe
+- Data files (Stocks.txt, Users.txt, Trades.txt) are automatically copied
+  next to Server.exe via a post-build event.
+- Run clean.bat to remove all build artifacts.
 
 
 HOW TO RUN
@@ -34,8 +40,8 @@ HOW TO RUN
    - Market data is displayed automatically on login
 
 3. Use client commands:
-   /b  - Buy stocks   (prompts for symbol and quantity)
-   /s  - Sell stocks   (prompts for symbol and quantity)
+   /b  - Buy stocks   (prompts for symbol and quantity, pays Ask price)
+   /s  - Sell stocks   (prompts for symbol and quantity, receives Bid price)
    /p  - View your portfolio (cash + holdings)
    /h  - View trade history (all trades by all users)
    /m  - Refresh market data display
@@ -47,9 +53,11 @@ HOW TO RUN
 
 DATA FILES (Server directory)
 -----------------------------
-- Stocks.txt   : Market stock data. Format: StockName Quantity Price
+- Stocks.txt   : Market stock data.
+                  Format: StockName Quantity BidPrice AskPrice
                   (one stock per line)
-- Users.txt    : User accounts. Format: Username Cash [StockName Qty Price ...]
+- Users.txt    : User accounts.
+                  Format: Username Cash [StockName Qty Cost ...]
                   (one user per line, stocks appended after cash)
 - Trades.txt   : Trade audit log. Timestamped records of all buy/sell trades.
 
@@ -73,20 +81,20 @@ Client:
   > Account Balance: $10000
   >
   > ===== MARKET DATA =====
-  > Symbol   | Available |   Price
-  > ---------+-----------+--------
-  > AAPL     |      1000 | $150
-  > GOOG     |       500 | $280
-  > MSFT     |       800 | $310
-  > AMZN     |       600 | $175
-  > TSLA     |       400 | $240
+  > Symbol   | Available |    Bid  |    Ask
+  > ---------+-----------+---------+--------
+  > AAPL     |      1000 | $   146 | $154
+  > GOOG     |       500 | $   272 | $288
+  > MSFT     |       800 | $   301 | $319
+  > AMZN     |       600 | $   170 | $180
+  > TSLA     |       400 | $   233 | $247
   > =======================
   >
   > /b
   > Stock symbol: AAPL
   > Quantity: 5
-  > BUY SUCCESS: 5 x AAPL @ $150 each (total: $750)
-  > Remaining Balance: $9250
+  > BUY SUCCESS: 5 x AAPL @ $154 each (total: $770)
+  > Remaining Balance: $9230
 
 
 MULTI-CLIENT TESTING
@@ -95,6 +103,7 @@ MULTI-CLIENT TESTING
 2. Open multiple Client.exe instances (on same or different machines on LAN)
 3. Log in with different usernames
 4. Buy/sell stocks from any client - market updates broadcast to all clients
+   automatically, and prices shift with each trade
 5. Use /p to verify portfolio consistency
 6. Use /h to see the full trade audit trail
 
@@ -118,7 +127,7 @@ Command IDs:
   0x09  RSP_PORTFOLIO  : Cash(4) + StockCount(4) + [Symbol(8)+Qty(4)+Cost(4)]...
   0x10  REQ_HISTORY    : (no payload)
   0x11  RSP_HISTORY    : MsgLength(4) + Text(N)
-  0x12  RSP_MARKET     : StockCount(4) + [Symbol(8) + Qty(4) + Price(4)]...
+  0x12  RSP_MARKET     : StockCount(4) + [Symbol(8)+Qty(4)+Bid(4)+Ask(4)]...
   0x13  RSP_MARKETUPDATE : (same format as RSP_MARKET, broadcast to all)
   0x14  REQ_MARKET     : (no payload, requests market refresh)
   0x25  RSP_ERROR      : MsgLength(4) + ErrorText(N)
@@ -133,6 +142,7 @@ Server:
   - Each client handled in its own worker thread
   - Shared state protected by mutexes (UsersMutex, MarketMutex, g_clientsMutex)
   - Persistent storage via text files (Users.txt, Stocks.txt, Trades.txt)
+  - Market-maker pricing: bid/ask spread with dynamic $1 tick movement per trade
 
 Client:
   - Main thread handles user input and sends requests
