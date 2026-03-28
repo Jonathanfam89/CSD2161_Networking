@@ -110,6 +110,12 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /Y "$(ProjectDir)Stocks.txt" "$(OutDir)"
+copy /Y "$(ProjectDir)Trades.txt" "$(OutDir)"
+copy /Y "$(ProjectDir)Users.txt" "$(OutDir)"</Command>
+      <Message>Copying data files to output directory...</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -125,6 +131,12 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /Y "$(ProjectDir)Stocks.txt" "$(OutDir)"
+copy /Y "$(ProjectDir)Trades.txt" "$(OutDir)"
+copy /Y "$(ProjectDir)Users.txt" "$(OutDir)"</Command>
+      <Message>Copying data files to output directory...</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Server.cpp" />
