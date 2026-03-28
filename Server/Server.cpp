@@ -15,6 +15,7 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#define NOMINMAX
 
 #include "Windows.h"		// Entire Win32 API...
 // #include "winsock2.h"	// ...or Winsock alone 
@@ -34,6 +35,7 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #include <filesystem>
 #include "taskqueue.h"
 #include <unordered_map>
+#include <math.h>
 
 // Hexa Command ID
 enum CMDID {
@@ -73,6 +75,13 @@ struct Stock
 	int Quantity, Cost;
 };
 
+struct MarketStock
+{
+	int Quantity;
+	int BidPrice; // price clients receive when selling
+	int AskPrice; // price clients pay when buying
+};
+
 struct Portfolio
 {
 	int Cash;
@@ -93,7 +102,7 @@ std::vector<ClientInfo> g_clients;					   // container of connected clients
 std::mutex              g_clientsMutex;				   // lock for the list
 std::unordered_map<std::string , Portfolio> Database;       
 std::mutex UsersMutex;
-std::unordered_map<std::string, Stock> StocksDataBase; // Name of stock: Stock struct   
+std::unordered_map<std::string, MarketStock> StocksDataBase; // Name of stock: MarketStock struct
 std::mutex MarketMutex;
 
 
@@ -238,13 +247,13 @@ void LoadMarket()
 	{
 		std::istringstream in(line);
 		std::string StockName;
-		int Quantity, Cost;
+		int Quantity, BidPrice, AskPrice;
 
-		in >> StockName >> Quantity >> Cost;
-		StocksDataBase[StockName] = {Quantity,Cost};
+		in >> StockName >> Quantity >> BidPrice >> AskPrice;
+		StocksDataBase[StockName] = {Quantity, BidPrice, AskPrice};
 
 #ifdef Debug
-		std::cout << StocksDataBase[StockName].Quantity << " " << StocksDataBase[StockName].Cost << std::endl;
+		std::cout << StocksDataBase[StockName].Quantity << " " << StocksDataBase[StockName].BidPrice << " " << StocksDataBase[StockName].AskPrice << std::endl;
 #endif
 	}
 
@@ -263,9 +272,9 @@ void SaveMarket()
 
 	for (auto const& [StockName, Data] : StocksDataBase)
 	{
-		std::ostringstream write;	
-		
-		write << StockName << " " << Data.Quantity << " " << Data.Cost;
+		std::ostringstream write;
+
+		write << StockName << " " << Data.Quantity << " " << Data.BidPrice << " " << Data.AskPrice;
 		write << "\n";
 		FilePath << write.str();
 	}
@@ -301,8 +310,11 @@ void SendMarket(SOCKET sock)
 		uint32_t qty = htonl((uint32_t)Data.Quantity);
 		sendExact(sock, (char*)&qty, 4);
 
-		uint32_t cost = htonl((uint32_t)Data.Cost);
-		sendExact(sock, (char*)&cost, 4);
+		uint32_t bid = htonl((uint32_t)Data.BidPrice);
+		sendExact(sock, (char*)&bid, 4);
+
+		uint32_t ask = htonl((uint32_t)Data.AskPrice);
+		sendExact(sock, (char*)&ask, 4);
 	}
 }
 
@@ -332,8 +344,11 @@ void BroadcastMarket()
 			uint32_t qty = htonl((uint32_t)Data.Quantity);
 			sendExact(client.socket, (char*)&qty, 4);
 
-			uint32_t cost = htonl((uint32_t)Data.Cost);
-			sendExact(client.socket, (char*)&cost, 4);
+			uint32_t bid = htonl((uint32_t)Data.BidPrice);
+			sendExact(client.socket, (char*)&bid, 4);
+
+			uint32_t ask = htonl((uint32_t)Data.AskPrice);
+			sendExact(client.socket, (char*)&ask, 4);
 		}
 	}
 }
@@ -397,7 +412,7 @@ void BuyStock(SOCKET sock, const std::string& username)
 		return;
 	}
 
-	int unitPrice = it->second.Cost;
+	int unitPrice = it->second.AskPrice; // buyers pay the ask price
 	int totalCost = unitPrice * quantity;
 
 	// Check user has enough cash
@@ -414,6 +429,11 @@ void BuyStock(SOCKET sock, const std::string& username)
 	portfolio.Stocks[symbol].Quantity += quantity;
 	portfolio.Stocks[symbol].Cost = unitPrice;
 	it->second.Quantity -= quantity;
+
+	// Fixed-tick price movement: buying pushes prices up by $1 (min $1)
+	const int PRICE_TICK = 1;
+	it->second.AskPrice = std::max(1, it->second.AskPrice + PRICE_TICK);
+	it->second.BidPrice = std::max(1, it->second.BidPrice + PRICE_TICK);
 
 	// Send RSP_BUY: symbol(8) + quantity(4) + unitPrice(4) + newCash(4)
 	unsigned char rsp = RSP_BUY;
@@ -479,7 +499,7 @@ void SellStock(SOCKET sock, const std::string& username)
 		return;
 	}
 
-	int unitPrice = mktIt->second.Cost;
+	int unitPrice = mktIt->second.BidPrice; // sellers receive the bid price
 	int totalRevenue = unitPrice * quantity;
 
 	// Execute the trade
@@ -488,6 +508,11 @@ void SellStock(SOCKET sock, const std::string& username)
 	if (usrIt->second.Quantity == 0)
 		portfolio.Stocks.erase(usrIt);
 	mktIt->second.Quantity += quantity;
+
+	// Fixed-tick price movement: selling pushes prices down by $1 (min $1)
+	constexpr int PRICE_TICK = 1;
+	mktIt->second.AskPrice = std::max(1, mktIt->second.AskPrice - PRICE_TICK);
+	mktIt->second.BidPrice = std::max(1, mktIt->second.BidPrice - PRICE_TICK);
 
 	// Send RSP_SELL: symbol(8) + quantity(4) + unitPrice(4) + newCash(4)
 	unsigned char rsp = RSP_SELL;

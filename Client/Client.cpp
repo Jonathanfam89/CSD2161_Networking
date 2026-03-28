@@ -122,26 +122,30 @@ void receiverThread(SOCKET tcpSock)
 
             std::lock_guard<std::mutex> lk(g_outputMutex);
             std::cout << "\n===== MARKET DATA =====\n";
-            std::cout << "Symbol   | Available |   Price\n";
-            std::cout << "---------+-----------+--------\n";
+            std::cout << "Symbol   | Available |    Bid  |    Ask\n";
+            std::cout << "---------+-----------+---------+--------\n";
 
             for (uint32_t i = 0; i < stockCount; ++i)
             {
                 char sym[8] = {};
                 if (recvAll(tcpSock, sym, 8) <= 0) break;
 
-                uint32_t qtyNet, priceNet;
+                uint32_t qtyNet, bidNet, askNet;
                 if (recvAll(tcpSock, (char*)&qtyNet, 4) <= 0) break;
-                if (recvAll(tcpSock, (char*)&priceNet, 4) <= 0) break;
+                if (recvAll(tcpSock, (char*)&bidNet, 4) <= 0) break;
+                if (recvAll(tcpSock, (char*)&askNet, 4) <= 0) break;
 
                 std::string symbol(sym, strnlen(sym, 8));
                 int qty = (int)ntohl(qtyNet);
-                int price = (int)ntohl(priceNet);
+                int bid = (int)ntohl(bidNet);
+                int ask = (int)ntohl(askNet);
 
                 // Pad symbol to 8 chars for alignment
                 std::string padded = symbol;
                 while (padded.size() < 8) padded += ' ';
-                std::cout << padded << " | " << std::setw(9) << qty << " | $" << price << "\n";
+                std::cout << padded << " | " << std::setw(9) << qty
+                          << " | $" << std::setw(6) << bid
+                          << " | $" << ask << "\n";
             }
             std::cout << "=======================\n";
         }
