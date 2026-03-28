@@ -1,0 +1,3 @@
+2026-03-28 18:53:19 zonghan BUY AAPL 2 @ 150 (total: 300)
+2026-03-28 18:53:49 zonghan SELL AAPL 1 @ 150 (total: 150)
+2026-03-28 18:54:35 zh BUY GOOG 5 @ 280 (total: 1400)
