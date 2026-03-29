@@ -11,5 +11,6 @@ rmdir /s /q Server\Release 2>nul
 rmdir /s /q Client\Debug 2>nul
 rmdir /s /q Client\Release 2>nul
 rmdir /s /q .vs 2>nul
+del /q Client\imgui.ini 2>nul
 
 echo Done.
