@@ -55,7 +55,7 @@ PREREQUISITES
 
 BUILD
 -----
-Option A: Using build.bat (recommended)
+Option A: Using build.bat
   1. Open a terminal in the project root directory
   2. Run build.bat
   3. Choose a configuration when prompted:
@@ -81,12 +81,17 @@ Build modes:
 
 HOW TO RUN
 ----------
+0. Build the project first (see BUILD section above), then change
+   directory to the output folder:
+     cd x64\Release      (if built in Release mode)
+     cd x64\Debug        (if built in Debug mode)
+
 1. Start the Server:
    - Run Server.exe
    - Enter a TCP port number (e.g. 8888)
-   - Server displays its IP address and begins listening
+   - Server displays its IP address(es) and begins listening
 
-2. Start one or more Clients:
+2. Start one or more Clients (from the same output directory):
    - Run Client.exe
    - A login window appears - enter the server IP, port, and username
    - Click "Connect & Login" (new users get $10,000 starting balance)
