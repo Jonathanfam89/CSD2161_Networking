@@ -17,14 +17,36 @@ Matching Model: Market-maker quotes with bid/ask spread.
     prices down by $1 (minimum $1).
 
 
+PREREQUISITES
+-------------
+- Visual Studio 2022 (Community, Professional, or Enterprise) with the
+  "Desktop development with C++" workload installed, OR
+  Visual Studio 2022 Build Tools with the C++ build tools component.
+- Windows 10 SDK (included with Visual Studio) — provides DirectX 11
+  headers and libraries (d3d11.lib, dxgi.lib, d3dcompiler.lib) required
+  by the Client's ImGui rendering backend.
+- x64 platform target
+
+
 BUILD
 -----
-- Open CSD2161_A5.sln in Visual Studio 2022
-- Build in Release mode, x64 platform
-- Outputs: x64/Release/Server.exe, x64/Release/Client.exe
-- Data files (Stocks.txt, Users.txt, Trades.txt) are automatically copied
-  next to Server.exe via a post-build event.
-- Run clean.bat to remove all build artifacts.
+Option A: Using build.bat (recommended)
+  1. Open a terminal in the project root directory
+  2. Run build.bat
+  3. Choose a configuration when prompted:
+       1 = Release  (GUI only, no console window)
+       2 = Debug    (GUI + console window for debug output)
+  4. Outputs: x64/<Config>/Server.exe, x64/<Config>/Client.exe
+
+Option B: Using Visual Studio IDE
+  1. Open CSD2161_A5.sln in Visual Studio 2022
+  2. Set platform to x64 and configuration to Release or Debug
+  3. Build Solution (Ctrl+Shift+B)
+
+Notes:
+  - Data files (Stocks.txt, Users.txt, Trades.txt) are automatically copied
+    next to Server.exe via a post-build event.
+  - Run clean.bat to remove all build artifacts.
 
 Build modes:
   - Debug (x64)   : Client runs with a console window (for debug output)
