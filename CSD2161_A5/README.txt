@@ -1,3 +1,28 @@
+/******************************************************************************/ 
+/*!
+\file        README.txt
+\author      Ban Kai Wei Benjamin
+\par         k.ban@digipen.edu
+\author      Chia Wei Xuan, Rachael
+\par         c.weixuanrachael@digipen.edu
+\author      Fam Qian Wei Jonathan
+\par	     fam.q@digipen.edu      
+\author      Zong Han Law
+\par         zonghan.law@digipen.edu
+\author      Muhammad Raziq Bin Mohd Rafig
+\par         muhammadraziq.b@digipen.edu
+
+\date        28 Mar 2026
+\brief       CSD2161/CSD2160:Assignment 5 – 
+		Interactive Online Trading Application
+
+Copyright (C) 2026 DigiPen Institute of Technology.
+
+Reproduction or disclosure of this file or its contents without the prior
+written consent of DigiPen Institute of Technology is prohibited.
+*/
+/******************************************************************************/
+
 ================================================================================
 CSD2161 Assignment 5 - Online Trading Platform (Option 3)
 ================================================================================
