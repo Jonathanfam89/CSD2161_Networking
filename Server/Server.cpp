@@ -4,7 +4,7 @@
 \author Ban Kai Wei Benjamin (k.ban@digipen.edu)
 \author Fam Qian Wei jonathan (fam.q@digipen.edu)
 \author Zong Han Law (zonghan.law@digipen.edu)
-\author Raziq
+\author Muhammad Raziq (muhammadraziq.b@digipen.edu)
 
 \date   03/28/2026
 \par Course: CSD2161
@@ -130,6 +130,300 @@ void SellStock(SOCKET sock, const std::string& username);
 void LogTrade(const std::string& username, const std::string& action,
               const std::string& symbol, int quantity, int unitPrice);
 
+/*
+* Logic functions
+* Implement trading rules and application behavior
+	
+	UserLogin
+		-Login()
+	Stock buy/sell
+		-BuyStock()
+		-SellStock()
+	Viewing of Trade Portfolio/History
+		-ViewHistory()
+		-ViewPortfolio()
+*/
+
+//Logging into the application
+void Login(SOCKET sock, std::string const& UserName)
+{
+	// only 1 client can assess database at a time
+	std::lock_guard<std::mutex> lock(UsersMutex);
+	Portfolio p;
+
+	auto it = Database.find(UserName);
+
+	// can find, print in client console and gib that info
+	if (it != Database.end())
+	{
+		// get existing user portfolio the from database
+		p = it->second;
+
+		unsigned char rsp = RSP_LOGIN;
+		int balanceNet = htonl(Database[UserName].Cash);
+		sendExact(sock, (char*)&rsp, 1);
+		sendExact(sock, (char*)&balanceNet, 4);
+	}
+
+	// its a new users, assigned cash value of 10k 
+	else
+	{
+		Database[UserName].Cash = 10000;
+
+		// then send info over.
+		unsigned char rsp = RSP_LOGIN;
+		int balanceNet = htonl(Database[UserName].Cash);
+		sendExact(sock, (char*)&rsp, 1);
+		sendExact(sock, (char*)&balanceNet, 4);
+	}
+
+}
+
+// Handle client buying stocks: read symbol(8) + quantity(4) from socket
+void BuyStock(SOCKET sock, const std::string& username)
+{
+	// Read the symbol (8 bytes padded) and quantity (4 bytes)
+	char symbolBuf[8] = {};
+	if (!recvAll(sock, symbolBuf, 8)) return;
+	std::string symbol(symbolBuf, strnlen(symbolBuf, 8));
+
+	uint32_t qtyNet;
+	if (!recvAll(sock, (char*)&qtyNet, 4)) return;
+	int quantity = (int)ntohl(qtyNet);
+
+	if (quantity <= 0)
+	{
+		SendError(sock, "Invalid quantity.");
+		return;
+	}
+
+	// Lock both market and user database
+	std::lock_guard<std::mutex> mktLock(MarketMutex);
+	std::lock_guard<std::mutex> usrLock(UsersMutex);
+
+	// Check stock exists in market
+	auto it = StocksDataBase.find(symbol);
+	if (it == StocksDataBase.end())
+	{
+		SendError(sock, "Stock '" + symbol + "' does not exist.");
+		return;
+	}
+
+	// Check market has enough quantity
+	if (it->second.Quantity < quantity)
+	{
+		SendError(sock, "Not enough shares available. Market has " +
+			std::to_string(it->second.Quantity) + " shares of " + symbol + ".");
+		return;
+	}
+
+	int unitPrice = it->second.AskPrice; // buyers pay the ask price
+	int totalCost = unitPrice * quantity;
+
+	// Check user has enough cash
+	auto& portfolio = Database[username];
+	if (portfolio.Cash < totalCost)
+	{
+		SendError(sock, "Not enough cash. Need $" + std::to_string(totalCost) +
+			" but you have $" + std::to_string(portfolio.Cash) + ".");
+		return;
+	}
+
+	// Execute the trade
+	portfolio.Cash -= totalCost;
+	portfolio.Stocks[symbol].Quantity += quantity;
+	portfolio.Stocks[symbol].Cost = unitPrice;
+	it->second.Quantity -= quantity;
+
+	// Fixed-tick price movement: buying pushes prices up by $1 (min $1)
+	const int PRICE_TICK = 1;
+	it->second.AskPrice = std::max(1, it->second.AskPrice + PRICE_TICK);
+	it->second.BidPrice = std::max(1, it->second.BidPrice + PRICE_TICK);
+
+	// Send RSP_BUY: symbol(8) + quantity(4) + unitPrice(4) + newCash(4)
+	unsigned char rsp = RSP_BUY;
+	sendExact(sock, (char*)&rsp, 1);
+
+	char symOut[8] = {};
+	memcpy(symOut, symbol.c_str(), (symbol.size() < 8 ? symbol.size() : 8));
+	sendExact(sock, symOut, 8);
+
+	uint32_t qOut = htonl((uint32_t)quantity);
+	sendExact(sock, (char*)&qOut, 4);
+
+	uint32_t pOut = htonl((uint32_t)unitPrice);
+	sendExact(sock, (char*)&pOut, 4);
+
+	uint32_t cOut = htonl((uint32_t)portfolio.Cash);
+	sendExact(sock, (char*)&cOut, 4);
+
+	// Log the trade
+	LogTrade(username, "BUY", symbol, quantity, unitPrice);
+
+	// Broadcast updated market to all clients
+	// (release locks first to avoid deadlock - we already made changes)
+	// Note: locks are released at end of scope, so broadcast after
+}
+
+// Handle client selling stocks: read symbol(8) + quantity(4) from socket
+void SellStock(SOCKET sock, const std::string& username)
+{
+	char symbolBuf[8] = {};
+	if (!recvAll(sock, symbolBuf, 8)) return;
+	std::string symbol(symbolBuf, strnlen(symbolBuf, 8));
+
+	uint32_t qtyNet;
+	if (!recvAll(sock, (char*)&qtyNet, 4)) return;
+	int quantity = (int)ntohl(qtyNet);
+
+	if (quantity <= 0)
+	{
+		SendError(sock, "Invalid quantity.");
+		return;
+	}
+
+	std::lock_guard<std::mutex> mktLock(MarketMutex);
+	std::lock_guard<std::mutex> usrLock(UsersMutex);
+
+	// Check stock exists in market (to get the price)
+	auto mktIt = StocksDataBase.find(symbol);
+	if (mktIt == StocksDataBase.end())
+	{
+		SendError(sock, "Stock '" + symbol + "' does not exist.");
+		return;
+	}
+
+	// Check user has enough of this stock
+	auto& portfolio = Database[username];
+	auto usrIt = portfolio.Stocks.find(symbol);
+	if (usrIt == portfolio.Stocks.end() || usrIt->second.Quantity < quantity)
+	{
+		int have = (usrIt != portfolio.Stocks.end()) ? usrIt->second.Quantity : 0;
+		SendError(sock, "Not enough shares. You have " + std::to_string(have) +
+			" shares of " + symbol + ".");
+		return;
+	}
+
+	int unitPrice = mktIt->second.BidPrice; // sellers receive the bid price
+	int totalRevenue = unitPrice * quantity;
+
+	// Execute the trade
+	portfolio.Cash += totalRevenue;
+	usrIt->second.Quantity -= quantity;
+	if (usrIt->second.Quantity == 0)
+		portfolio.Stocks.erase(usrIt);
+	mktIt->second.Quantity += quantity;
+
+	// Fixed-tick price movement: selling pushes prices down by $1 (min $1)
+	constexpr int PRICE_TICK = 1;
+	mktIt->second.AskPrice = std::max(1, mktIt->second.AskPrice - PRICE_TICK);
+	mktIt->second.BidPrice = std::max(1, mktIt->second.BidPrice - PRICE_TICK);
+
+	// Send RSP_SELL: symbol(8) + quantity(4) + unitPrice(4) + newCash(4)
+	unsigned char rsp = RSP_SELL;
+	sendExact(sock, (char*)&rsp, 1);
+
+	char symOut[8] = {};
+	memcpy(symOut, symbol.c_str(), (symbol.size() < 8 ? symbol.size() : 8));
+	sendExact(sock, symOut, 8);
+
+	uint32_t qOut = htonl((uint32_t)quantity);
+	sendExact(sock, (char*)&qOut, 4);
+
+	uint32_t pOut = htonl((uint32_t)unitPrice);
+	sendExact(sock, (char*)&pOut, 4);
+
+	uint32_t cOut = htonl((uint32_t)portfolio.Cash);
+	sendExact(sock, (char*)&cOut, 4);
+
+	LogTrade(username, "SELL", symbol, quantity, unitPrice);
+}
+
+// read Trades.txt
+void ViewHistory(SOCKET socket)
+{
+	std::ifstream FilePath("Trades.txt");
+	if (!FilePath.is_open())
+	{
+		std::cout << "Cannot open Trades.txt\n";
+		return;
+	}
+
+	std::string line;
+	std::ostringstream output;
+	while (std::getline(FilePath, line))
+	{
+		output << line;
+		output << "\n";
+	}
+
+	std::string text = output.str();
+
+	// send RSP_HISTORY to client
+	unsigned char rsp = RSP_HISTORY;
+	sendExact(socket, (char*)&rsp, 1);
+
+	// send message length to client
+	uint32_t msgLen = htonl((uint32_t)text.size());
+	sendExact(socket, (char*)&msgLen, 4);
+
+	// send the fake "txt" to client XD. its NOT a file jsut like what would be written to the file but to the client instead :P
+	sendExact(socket, text.c_str(), (int)text.size());
+}
+
+// View Users own assets
+void ViewPortfolio(SOCKET socket, std::string const& Username)
+{
+	Portfolio portfolio;
+
+	// Only 1 client can use database at a time
+	std::lock_guard<std::mutex> lock(UsersMutex);
+
+	portfolio = Database[Username];
+
+	// send RSP_PORTFOLIO to client
+	unsigned char rsp = RSP_PORTFOLIO;
+	sendExact(socket, (char*)&rsp, 1);
+
+	// one for da cash user has
+	uint32_t cash = htonl(portfolio.Cash);
+	sendExact(socket, (char*)&cash, 4);
+
+	// Tell client side how many stocks user has
+	uint32_t StockCount = htonl((uint32_t)portfolio.Stocks.size());
+	sendExact(socket, (char*)&StockCount, 4);
+
+	// one for da stocks user has
+	for (auto const& [StockName, Data] : portfolio.Stocks)
+	{
+		// Pad 2 8 byte, 4 for cost, 4 for quantity
+		char symbol[8] = {};
+		memcpy(symbol, StockName.c_str(), StockName.size());
+		sendExact(socket, symbol, 8);
+
+		uint32_t Quantity = htonl((uint32_t)Data.Quantity);
+		sendExact(socket, (char*)&Quantity, 4);
+
+		uint32_t Cost = htonl((uint32_t)Data.Cost);
+		sendExact(socket, (char*)&Cost, 4);
+	}
+}
+
+/*
+* Persistence functions
+* loading, saving
+	
+	Database
+	-LoadDatabase()
+	-SaveDatabase()
+	Market
+	-LoadMarket()
+	-SaveMarket()
+	TradeLog
+	-LogTrade()
+*/
+
+
 // Load database to the DataBase Container
 void LoadDatabase()
 {
@@ -205,41 +499,6 @@ void SaveDatabase()
 	}
 }
 
-//Logging into the application
-void Login(SOCKET sock, std::string const& UserName)
-{
-	// only 1 client can assess database at a time
-	std::lock_guard<std::mutex> lock(UsersMutex);
-	Portfolio p;
-
-	auto it = Database.find(UserName);
-
-	// can find, print in client console and gib that info
-	if (it != Database.end())
-	{
-		// get existing user portfolio the from database
-		p = it->second; 
-
-		unsigned char rsp = RSP_LOGIN;
-		int balanceNet = htonl(Database[UserName].Cash);
-		sendExact(sock, (char*)&rsp, 1);
-		sendExact(sock, (char*)&balanceNet, 4);
-	}
-
-	// its a new users, assigned cash value of 10k 
-	else
-	{
-		Database[UserName].Cash = 10000;
-
-		// then send info over.
-		unsigned char rsp = RSP_LOGIN;
-		int balanceNet = htonl(Database[UserName].Cash);
-		sendExact(sock, (char*)&rsp, 1);
-		sendExact(sock, (char*)&balanceNet, 4);
-	}
-	
-}
-
 // Load market at the start, read from Stocks.txt
 void LoadMarket()
 {
@@ -289,82 +548,9 @@ void SaveMarket()
 	}
 }
 
-// Send error message to a single client
-void SendError(SOCKET sock, const std::string& msg)
-{
-	unsigned char rsp = RSP_ERROR;
-	sendExact(sock, (char*)&rsp, 1);
-	uint32_t msgLen = htonl((uint32_t)msg.size());
-	sendExact(sock, (char*)&msgLen, 4);
-	sendExact(sock, msg.c_str(), (int)msg.size());
-}
-
-// Send full market data to a single client
-void SendMarket(SOCKET sock)
-{
-	std::lock_guard<std::mutex> lock(MarketMutex);
-
-	unsigned char rsp = RSP_MARKET;
-	sendExact(sock, (char*)&rsp, 1);
-
-	uint32_t stockCount = htonl((uint32_t)StocksDataBase.size());
-	sendExact(sock, (char*)&stockCount, 4);
-
-	for (auto const& [StockName, Data] : StocksDataBase)
-	{
-		char symbol[8] = {};
-		memcpy(symbol, StockName.c_str(), (StockName.size() < 8 ? StockName.size() : 8));
-		sendExact(sock, symbol, 8);
-
-		uint32_t qty = htonl((uint32_t)Data.Quantity);
-		sendExact(sock, (char*)&qty, 4);
-
-		uint32_t bid = htonl((uint32_t)Data.BidPrice);
-		sendExact(sock, (char*)&bid, 4);
-
-		uint32_t ask = htonl((uint32_t)Data.AskPrice);
-		sendExact(sock, (char*)&ask, 4);
-	}
-}
-
-// Broadcast market update to ALL connected clients
-void BroadcastMarket()
-{
-	std::lock_guard<std::mutex> clientLock(g_clientsMutex);
-
-	// Build the market payload once (without the per-client send lock)
-	unsigned char rsp = RSP_MARKETUPDATE;
-
-	for (auto& client : g_clients)
-	{
-		// Send RSP_MARKETUPDATE header
-		sendExact(client.socket, (char*)&rsp, 1);
-
-		std::lock_guard<std::mutex> mktLock(MarketMutex);
-		uint32_t stockCount = htonl((uint32_t)StocksDataBase.size());
-		sendExact(client.socket, (char*)&stockCount, 4);
-
-		for (auto const& [StockName, Data] : StocksDataBase)
-		{
-			char symbol[8] = {};
-			memcpy(symbol, StockName.c_str(), (StockName.size() < 8 ? StockName.size() : 8));
-			sendExact(client.socket, symbol, 8);
-
-			uint32_t qty = htonl((uint32_t)Data.Quantity);
-			sendExact(client.socket, (char*)&qty, 4);
-
-			uint32_t bid = htonl((uint32_t)Data.BidPrice);
-			sendExact(client.socket, (char*)&bid, 4);
-
-			uint32_t ask = htonl((uint32_t)Data.AskPrice);
-			sendExact(client.socket, (char*)&ask, 4);
-		}
-	}
-}
-
 // Log a trade to Trades.txt with timestamp
 void LogTrade(const std::string& username, const std::string& action,
-              const std::string& symbol, int quantity, int unitPrice)
+	const std::string& symbol, int quantity, int unitPrice)
 {
 	// Get current time
 	auto now = std::chrono::system_clock::now();
@@ -378,240 +564,29 @@ void LogTrade(const std::string& username, const std::string& action,
 	if (file.is_open())
 	{
 		file << timeBuf << " " << username << " " << action << " "
-		     << symbol << " " << quantity << " @ " << unitPrice
-		     << " (total: " << quantity * unitPrice << ")\n";
+			<< symbol << " " << quantity << " @ " << unitPrice
+			<< " (total: " << quantity * unitPrice << ")\n";
 	}
 }
 
-// Handle client buying stocks: read symbol(8) + quantity(4) from socket
-void BuyStock(SOCKET sock, const std::string& username)
-{
-	// Read the symbol (8 bytes padded) and quantity (4 bytes)
-	char symbolBuf[8] = {};
-	if (!recvAll(sock, symbolBuf, 8)) return;
-	std::string symbol(symbolBuf, strnlen(symbolBuf, 8));
+/*
+	Networking functions
+	Handles connections,sockets, send , receive and client communication
 
-	uint32_t qtyNet;
-	if (!recvAll(sock, (char*)&qtyNet, 4)) return;
-	int quantity = (int)ntohl(qtyNet);
+	execute(SOCKET clientSocket)
+	disconnect(SOCKET& listenerSocket)
+	GetLocalIPAddresses()
+	recvAll()
+	sendExact()
+	addClient()
+	removeClient()
+	SendError()
+	SendMarket()
+	BroadcastMarket()
 
-	if (quantity <= 0)
-	{
-		SendError(sock, "Invalid quantity.");
-		return;
-	}
-
-	// Lock both market and user database
-	std::lock_guard<std::mutex> mktLock(MarketMutex);
-	std::lock_guard<std::mutex> usrLock(UsersMutex);
-
-	// Check stock exists in market
-	auto it = StocksDataBase.find(symbol);
-	if (it == StocksDataBase.end())
-	{
-		SendError(sock, "Stock '" + symbol + "' does not exist.");
-		return;
-	}
-
-	// Check market has enough quantity
-	if (it->second.Quantity < quantity)
-	{
-		SendError(sock, "Not enough shares available. Market has " +
-		          std::to_string(it->second.Quantity) + " shares of " + symbol + ".");
-		return;
-	}
-
-	int unitPrice = it->second.AskPrice; // buyers pay the ask price
-	int totalCost = unitPrice * quantity;
-
-	// Check user has enough cash
-	auto& portfolio = Database[username];
-	if (portfolio.Cash < totalCost)
-	{
-		SendError(sock, "Not enough cash. Need $" + std::to_string(totalCost) +
-		          " but you have $" + std::to_string(portfolio.Cash) + ".");
-		return;
-	}
-
-	// Execute the trade
-	portfolio.Cash -= totalCost;
-	portfolio.Stocks[symbol].Quantity += quantity;
-	portfolio.Stocks[symbol].Cost = unitPrice;
-	it->second.Quantity -= quantity;
-
-	// Fixed-tick price movement: buying pushes prices up by $1 (min $1)
-	const int PRICE_TICK = 1;
-	it->second.AskPrice = std::max(1, it->second.AskPrice + PRICE_TICK);
-	it->second.BidPrice = std::max(1, it->second.BidPrice + PRICE_TICK);
-
-	// Send RSP_BUY: symbol(8) + quantity(4) + unitPrice(4) + newCash(4)
-	unsigned char rsp = RSP_BUY;
-	sendExact(sock, (char*)&rsp, 1);
-
-	char symOut[8] = {};
-	memcpy(symOut, symbol.c_str(), (symbol.size() < 8 ? symbol.size() : 8));
-	sendExact(sock, symOut, 8);
-
-	uint32_t qOut = htonl((uint32_t)quantity);
-	sendExact(sock, (char*)&qOut, 4);
-
-	uint32_t pOut = htonl((uint32_t)unitPrice);
-	sendExact(sock, (char*)&pOut, 4);
-
-	uint32_t cOut = htonl((uint32_t)portfolio.Cash);
-	sendExact(sock, (char*)&cOut, 4);
-
-	// Log the trade
-	LogTrade(username, "BUY", symbol, quantity, unitPrice);
-
-	// Broadcast updated market to all clients
-	// (release locks first to avoid deadlock - we already made changes)
-	// Note: locks are released at end of scope, so broadcast after
-}
-
-// Handle client selling stocks: read symbol(8) + quantity(4) from socket
-void SellStock(SOCKET sock, const std::string& username)
-{
-	char symbolBuf[8] = {};
-	if (!recvAll(sock, symbolBuf, 8)) return;
-	std::string symbol(symbolBuf, strnlen(symbolBuf, 8));
-
-	uint32_t qtyNet;
-	if (!recvAll(sock, (char*)&qtyNet, 4)) return;
-	int quantity = (int)ntohl(qtyNet);
-
-	if (quantity <= 0)
-	{
-		SendError(sock, "Invalid quantity.");
-		return;
-	}
-
-	std::lock_guard<std::mutex> mktLock(MarketMutex);
-	std::lock_guard<std::mutex> usrLock(UsersMutex);
-
-	// Check stock exists in market (to get the price)
-	auto mktIt = StocksDataBase.find(symbol);
-	if (mktIt == StocksDataBase.end())
-	{
-		SendError(sock, "Stock '" + symbol + "' does not exist.");
-		return;
-	}
-
-	// Check user has enough of this stock
-	auto& portfolio = Database[username];
-	auto usrIt = portfolio.Stocks.find(symbol);
-	if (usrIt == portfolio.Stocks.end() || usrIt->second.Quantity < quantity)
-	{
-		int have = (usrIt != portfolio.Stocks.end()) ? usrIt->second.Quantity : 0;
-		SendError(sock, "Not enough shares. You have " + std::to_string(have) +
-		          " shares of " + symbol + ".");
-		return;
-	}
-
-	int unitPrice = mktIt->second.BidPrice; // sellers receive the bid price
-	int totalRevenue = unitPrice * quantity;
-
-	// Execute the trade
-	portfolio.Cash += totalRevenue;
-	usrIt->second.Quantity -= quantity;
-	if (usrIt->second.Quantity == 0)
-		portfolio.Stocks.erase(usrIt);
-	mktIt->second.Quantity += quantity;
-
-	// Fixed-tick price movement: selling pushes prices down by $1 (min $1)
-	constexpr int PRICE_TICK = 1;
-	mktIt->second.AskPrice = std::max(1, mktIt->second.AskPrice - PRICE_TICK);
-	mktIt->second.BidPrice = std::max(1, mktIt->second.BidPrice - PRICE_TICK);
-
-	// Send RSP_SELL: symbol(8) + quantity(4) + unitPrice(4) + newCash(4)
-	unsigned char rsp = RSP_SELL;
-	sendExact(sock, (char*)&rsp, 1);
-
-	char symOut[8] = {};
-	memcpy(symOut, symbol.c_str(), (symbol.size() < 8 ? symbol.size() : 8));
-	sendExact(sock, symOut, 8);
-
-	uint32_t qOut = htonl((uint32_t)quantity);
-	sendExact(sock, (char*)&qOut, 4);
-
-	uint32_t pOut = htonl((uint32_t)unitPrice);
-	sendExact(sock, (char*)&pOut, 4);
-
-	uint32_t cOut = htonl((uint32_t)portfolio.Cash);
-	sendExact(sock, (char*)&cOut, 4);
-
-	LogTrade(username, "SELL", symbol, quantity, unitPrice);
-}
-
-// read Trades.txt
-void ViewHistory(SOCKET socket) 
-{
-	std::ifstream FilePath("Trades.txt");
-	if (!FilePath.is_open())
-	{
-		std::cout << "Cannot open Trades.txt\n";
-		return;
-	}
-
-	std::string line;
-	std::ostringstream output;
-	while (std::getline(FilePath, line))
-	{
-		output << line;
-		output << "\n";
-	}
-
-	std::string text = output.str();
-
-	// send RSP_HISTORY to client
-	unsigned char rsp = RSP_HISTORY;
-	sendExact(socket, (char*)&rsp, 1);
-
-	// send message length to client
-	uint32_t msgLen = htonl((uint32_t)text.size());
-	sendExact(socket, (char*)&msgLen, 4);
-
-	// send the fake "txt" to client XD. its NOT a file jsut like what would be written to the file but to the client instead :P
-	sendExact(socket, text.c_str(), (int)text.size());
-}
-
-// View Users own assets
-void ViewPortfolio(SOCKET socket, std::string const& Username)
-{
-	Portfolio portfolio; 
-
-	// Only 1 client can use database at a time
-	std::lock_guard<std::mutex> lock(UsersMutex); 
-
-	portfolio = Database[Username];
-
-	// send RSP_PORTFOLIO to client
-	unsigned char rsp = RSP_PORTFOLIO;
-	sendExact(socket, (char*)&rsp, 1);
-	
-	// one for da cash user has
-	uint32_t cash = htonl(portfolio.Cash);
-	sendExact(socket, (char*)&cash, 4);
-
-	// Tell client side how many stocks user has
-	uint32_t StockCount = htonl((uint32_t)portfolio.Stocks.size());
-	sendExact(socket, (char*)&StockCount, 4);
-
-	// one for da stocks user has
-	for (auto const& [StockName, Data] : portfolio.Stocks)
-	{
-		// Pad 2 8 byte, 4 for cost, 4 for quantity
-		char symbol[8] = {};
-		memcpy(symbol, StockName.c_str(), StockName.size());
-		sendExact(socket, symbol, 8);
-
-		uint32_t Quantity = htonl((uint32_t)Data.Quantity);
-		sendExact(socket, (char*)&Quantity, 4);
-
-		uint32_t Cost = htonl((uint32_t)Data.Cost);
-		sendExact(socket, (char*)&Cost, 4);
-	}
-}
+	main()
+	-some networking logic e.g. wsa startup, bind socket
+*/
 
 int main()
 {
@@ -787,6 +762,79 @@ int main()
 
 	WSACleanup();
 	return 0;
+}
+
+// Send error message to a single client
+void SendError(SOCKET sock, const std::string& msg)
+{
+	unsigned char rsp = RSP_ERROR;
+	sendExact(sock, (char*)&rsp, 1);
+	uint32_t msgLen = htonl((uint32_t)msg.size());
+	sendExact(sock, (char*)&msgLen, 4);
+	sendExact(sock, msg.c_str(), (int)msg.size());
+}
+
+// Send full market data to a single client
+void SendMarket(SOCKET sock)
+{
+	std::lock_guard<std::mutex> lock(MarketMutex);
+
+	unsigned char rsp = RSP_MARKET;
+	sendExact(sock, (char*)&rsp, 1);
+
+	uint32_t stockCount = htonl((uint32_t)StocksDataBase.size());
+	sendExact(sock, (char*)&stockCount, 4);
+
+	for (auto const& [StockName, Data] : StocksDataBase)
+	{
+		char symbol[8] = {};
+		memcpy(symbol, StockName.c_str(), (StockName.size() < 8 ? StockName.size() : 8));
+		sendExact(sock, symbol, 8);
+
+		uint32_t qty = htonl((uint32_t)Data.Quantity);
+		sendExact(sock, (char*)&qty, 4);
+
+		uint32_t bid = htonl((uint32_t)Data.BidPrice);
+		sendExact(sock, (char*)&bid, 4);
+
+		uint32_t ask = htonl((uint32_t)Data.AskPrice);
+		sendExact(sock, (char*)&ask, 4);
+	}
+}
+
+// Broadcast market update to ALL connected clients
+void BroadcastMarket()
+{
+	std::lock_guard<std::mutex> clientLock(g_clientsMutex);
+
+	// Build the market payload once (without the per-client send lock)
+	unsigned char rsp = RSP_MARKETUPDATE;
+
+	for (auto& client : g_clients)
+	{
+		// Send RSP_MARKETUPDATE header
+		sendExact(client.socket, (char*)&rsp, 1);
+
+		std::lock_guard<std::mutex> mktLock(MarketMutex);
+		uint32_t stockCount = htonl((uint32_t)StocksDataBase.size());
+		sendExact(client.socket, (char*)&stockCount, 4);
+
+		for (auto const& [StockName, Data] : StocksDataBase)
+		{
+			char symbol[8] = {};
+			memcpy(symbol, StockName.c_str(), (StockName.size() < 8 ? StockName.size() : 8));
+			sendExact(client.socket, symbol, 8);
+
+			uint32_t qty = htonl((uint32_t)Data.Quantity);
+			sendExact(client.socket, (char*)&qty, 4);
+
+			uint32_t bid = htonl((uint32_t)Data.BidPrice);
+			sendExact(client.socket, (char*)&bid, 4);
+
+			uint32_t ask = htonl((uint32_t)Data.AskPrice);
+			sendExact(client.socket, (char*)&ask, 4);
+		}
+	}
 }
 
 // Handles one connected client's full session: login, command processing, and cleanup on disconnect.
