@@ -112,6 +112,7 @@ std::unordered_map<std::string , Portfolio> Database;
 std::mutex UsersMutex;
 std::unordered_map<std::string, MarketStock> StocksDataBase; // Name of stock: MarketStock struct
 std::mutex MarketMutex;
+std::mutex TradesMutex;
 
 
 // forward declaration
@@ -163,7 +164,7 @@ void LoadDatabase()
 			portfolio.Stocks[StockName] = { Quantity, Cost };
 
 #ifdef Debug
-			std::cout << portfolio.Stocks[StockName].first << " " << portfolio.Stocks[StockName].second << std::endl;
+			std::cout << portfolio.Stocks[StockName].Quantity << " " << portfolio.Stocks[StockName].Cost << std::endl;
 #endif
 		}
 
@@ -208,6 +209,13 @@ void SaveDatabase()
 //Logging into the application
 void Login(SOCKET sock, std::string const& UserName)
 {
+	// Reject usernames with spaces — Users.txt is space-delimited
+	if (UserName.find(' ') != std::string::npos)
+	{
+		SendError(sock, "Username cannot contain spaces.");
+		return;
+	}
+
 	// only 1 client can assess database at a time
 	std::lock_guard<std::mutex> lock(UsersMutex);
 	Portfolio p;
@@ -335,13 +343,14 @@ void BroadcastMarket()
 	// Build the market payload once (without the per-client send lock)
 	unsigned char rsp = RSP_MARKETUPDATE;
 
+	// Lock market when market updates(buy/sell happen)
+	std::lock_guard<std::mutex> mktLock(MarketMutex);
+	uint32_t stockCount = htonl((uint32_t)StocksDataBase.size());
+
 	for (auto& client : g_clients)
 	{
 		// Send RSP_MARKETUPDATE header
 		sendExact(client.socket, (char*)&rsp, 1);
-
-		std::lock_guard<std::mutex> mktLock(MarketMutex);
-		uint32_t stockCount = htonl((uint32_t)StocksDataBase.size());
 		sendExact(client.socket, (char*)&stockCount, 4);
 
 		for (auto const& [StockName, Data] : StocksDataBase)
@@ -374,6 +383,7 @@ void LogTrade(const std::string& username, const std::string& action,
 	localtime_s(&tmBuf, &t);
 	strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tmBuf);
 
+	std::lock_guard<std::mutex> lk(TradesMutex);
 	std::ofstream file("Trades.txt", std::ios::app);
 	if (file.is_open())
 	{
@@ -544,8 +554,9 @@ void SellStock(SOCKET sock, const std::string& username)
 }
 
 // read Trades.txt
-void ViewHistory(SOCKET socket) 
+void ViewHistory(SOCKET socket)
 {
+	std::lock_guard<std::mutex> lk(TradesMutex);
 	std::ifstream FilePath("Trades.txt");
 	if (!FilePath.is_open())
 	{
@@ -753,7 +764,18 @@ int main()
 
 	// Create TaskQueue and accept clients
 	{
-		const auto onDisconnect = [&]() { disconnect(listenerSocket); };
+		const auto onDisconnect = [&]()
+		{
+			disconnect(listenerSocket);
+			// Close all client sockets so blocked recv() calls return,
+			// allowing worker threads to finish and join() to succeed.
+			std::lock_guard<std::mutex> lock(g_clientsMutex);
+			for (auto& client : g_clients)
+			{
+				shutdown(client.socket, SD_BOTH);
+				closesocket(client.socket);
+			}
+		};
 		auto tq = TaskQueue<SOCKET, decltype(execute), decltype(onDisconnect)>{ 10, 20, execute, onDisconnect }; // 10 threads + 20 queue slot
 
 		// Main accept loop: runs forever until server shuts down
@@ -776,9 +798,9 @@ int main()
 		}
 	}
 
-	// save data when server close
-	SaveDatabase();
-	SaveMarket();
+	// save data when server close, but lock it when its saving incase someone is buying/selling
+	{ std::lock_guard<std::mutex> lk(UsersMutex);  SaveDatabase(); }
+	{ std::lock_guard<std::mutex> lk(MarketMutex); SaveMarket();   }
 	// -------------------------------------------------------------------------
 	// Clean-up after Winsock.
 	//
@@ -871,10 +893,27 @@ bool execute(SOCKET clientSocket)
 			}
 		}
 
+		// Disconnect if username they give us has a space :p
+		if (Username.find(' ') != std::string::npos)
+		{
+			removeClient(clientIP, clientPort);
+			shutdown(clientSocket, SD_BOTH);
+			closesocket(clientSocket);
+			return true;
+		}
+
 		// Send initial market data to the client
 		SendMarket(clientSocket);
 	}
-
+	
+	// If they no gib us a username >:(
+	if (Username.empty())
+	{
+		removeClient(clientIP, clientPort);
+		shutdown(clientSocket, SD_BOTH);
+		closesocket(clientSocket);
+		return true;
+	}
 
 	// Main loop for command ID
 	while (true)
@@ -933,8 +972,9 @@ bool execute(SOCKET clientSocket)
 		}
 	}
 
-	SaveDatabase();
-	SaveMarket();
+	// save data when client closes, but lock it when its saving incase someone is buying/selling
+	{ std::lock_guard<std::mutex> lk(UsersMutex);  SaveDatabase(); }
+	{ std::lock_guard<std::mutex> lk(MarketMutex); SaveMarket();   }
 	// -------------------------------------------------------------------------
 	// Shut down , remove client and close sockets.
 	//
