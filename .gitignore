@@ -20,7 +20,11 @@ Release
 *.orig
 .vs
 .tmp
+*.vcxproj*
 *.vcxproj.filters
+*.vcxproj.user
+*.VC.db
+*.VC.opendb
 
 *.html
 _deps
