@@ -8,6 +8,8 @@ A client-server online stock trading system over TCP/LAN. Multiple clients can
 connect simultaneously to buy/sell stocks from a shared market. All state is
 server-authoritative with persistent storage.
 
+The client features a graphical UI built with ImGui (DirectX 11 backend).
+
 Matching Model: Market-maker quotes with bid/ask spread.
   - Ask price: the price clients pay when BUYING.
   - Bid price: the price clients receive when SELLING.
@@ -15,14 +17,41 @@ Matching Model: Market-maker quotes with bid/ask spread.
     prices down by $1 (minimum $1).
 
 
+PREREQUISITES
+-------------
+- Visual Studio 2022 (Community, Professional, or Enterprise) with the
+  "Desktop development with C++" workload installed, OR
+  Visual Studio 2022 Build Tools with the C++ build tools component.
+- Windows 10 SDK (included with Visual Studio) — provides DirectX 11
+  headers and libraries (d3d11.lib, dxgi.lib, d3dcompiler.lib) required
+  by the Client's ImGui rendering backend.
+- x64 platform target
+
+
 BUILD
 -----
-- Open CSD2161_A5.sln in Visual Studio 2022
-- Build in Release mode, x64 platform
-- Outputs: x64/Release/Server.exe, x64/Release/Client.exe
-- Data files (Stocks.txt, Users.txt, Trades.txt) are automatically copied
-  next to Server.exe via a post-build event.
-- Run clean.bat to remove all build artifacts.
+Option A: Using build.bat (recommended)
+  1. Open a terminal in the project root directory
+  2. Run build.bat
+  3. Choose a configuration when prompted:
+       1 = Release  (GUI only, no console window)
+       2 = Debug    (GUI + console window for debug output)
+  4. Outputs: x64/<Config>/Server.exe, x64/<Config>/Client.exe
+
+Option B: Using Visual Studio IDE
+  1. Open CSD2161_A5.sln in Visual Studio 2022
+  2. Set platform to x64 and configuration to Release or Debug
+  3. Build Solution (Ctrl+Shift+B)
+
+Notes:
+  - Data files (Stocks.txt, Users.txt, Trades.txt) are automatically copied
+    next to Server.exe via a post-build event.
+  - Run clean.bat to remove all build artifacts.
+
+Build modes:
+  - Debug (x64)   : Client runs with a console window (for debug output)
+                     alongside the ImGui GUI window.
+  - Release (x64) : Client runs with the ImGui GUI window only (no console).
 
 
 HOW TO RUN
@@ -34,18 +63,20 @@ HOW TO RUN
 
 2. Start one or more Clients:
    - Run Client.exe
-   - Enter the server IP address shown by the server
-   - Enter the same TCP port number (e.g. 8888)
-   - Enter a username (new users get $10,000 starting balance)
+   - A login window appears - enter the server IP, port, and username
+   - Click "Connect & Login" (new users get $10,000 starting balance)
    - Market data is displayed automatically on login
 
-3. Use client commands:
-   /b  - Buy stocks   (prompts for symbol and quantity, pays Ask price)
-   /s  - Sell stocks   (prompts for symbol and quantity, receives Bid price)
-   /p  - View your portfolio (cash + holdings)
-   /h  - View trade history (all trades by all users)
-   /m  - Refresh market data display
-   /q  - Quit
+3. Client GUI:
+   - Market panel (left)     : live table of stocks with Bid/Ask prices;
+                                click "Refresh" to update
+   - Activity Log (left)     : color-coded log of trades, errors, notifications
+   - Trading panel (right)   : collapsible sections for:
+       Portfolio              : cash balance + holdings table
+       Buy Stocks             : enter symbol + quantity, click "Buy"
+       Sell Stocks            : enter symbol + quantity, click "Sell"
+       Trade History          : click "Load History" to view all past trades
+   - Top bar                 : shows username, cash, and "Disconnect" button
 
 4. To stop the server, close the server console window.
    User data and market state are saved on each client disconnect.
@@ -65,38 +96,6 @@ Default stocks: AAPL, GOOG, MSFT, AMZN, TSLA
 New users start with $10,000 cash.
 
 
-EXAMPLE SESSION
----------------
-Server:
-  > Server TCP port Number : 8888
-  > Server IP Address      : 192.168.1.10
-  > Server TCP port Number : 8888
-
-Client:
-  > Server IP Address      : 192.168.1.10
-  > Server TCP Port Number : 8888
-  > Connected to the server!
-  > Username: alice
-  > Login successful!
-  > Account Balance: $10000
-  >
-  > ===== MARKET DATA =====
-  > Symbol   | Available |    Bid  |    Ask
-  > ---------+-----------+---------+--------
-  > AAPL     |      1000 | $   146 | $154
-  > GOOG     |       500 | $   272 | $288
-  > MSFT     |       800 | $   301 | $319
-  > AMZN     |       600 | $   170 | $180
-  > TSLA     |       400 | $   233 | $247
-  > =======================
-  >
-  > /b
-  > Stock symbol: AAPL
-  > Quantity: 5
-  > BUY SUCCESS: 5 x AAPL @ $154 each (total: $770)
-  > Remaining Balance: $9230
-
-
 MULTI-CLIENT TESTING
 --------------------
 1. Start Server.exe
@@ -104,8 +103,8 @@ MULTI-CLIENT TESTING
 3. Log in with different usernames
 4. Buy/sell stocks from any client - market updates broadcast to all clients
    automatically, and prices shift with each trade
-5. Use /p to verify portfolio consistency
-6. Use /h to see the full trade audit trail
+5. Check the Portfolio section to verify consistency
+6. Expand Trade History to see the full audit trail
 
 
 PROTOCOL FORMAT
@@ -145,6 +144,8 @@ Server:
   - Market-maker pricing: bid/ask spread with dynamic $1 tick movement per trade
 
 Client:
-  - Main thread handles user input and sends requests
+  - ImGui (Dear ImGui) graphical interface with DirectX 11 rendering backend
+  - Main thread runs the ImGui render loop, reads shared state, sends commands
   - Dedicated receiver thread processes all server responses asynchronously
-  - Thread-safe console output via g_outputMutex
+    and updates shared state (mutex-protected)
+  - Debug build includes a console window for stdout/stderr output

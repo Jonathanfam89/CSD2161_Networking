@@ -4,17 +4,17 @@
 \author Ban Kai Wei Benjamin (k.ban@digipen.edu)
 \author Fam Qian Wei jonathan (fam.q@digipen.edu)
 \author Zong Han Law (zonghan.law@digipen.edu)
-\author Raziq
+\author Muhammad Raziq Bin Mohd Rafig (muhammadraziq.b@digipen.edu)
 
 \date   03/28/2026
 \par Course: CSD2161
 \par Assignment: Assignment 5
-\brief  This file is the Server-side implementation of a TCP LAN 
+\brief  This file is the Server-side implementation of a TCP LAN
 		online trading platform.
 
-        Manages connected clients, processes trading commands, updates
-        portfolios and market prices, and persists user/trade data.
-		
+		Manages connected clients, processes trading commands, updates
+		portfolios and market prices, and persists user/trade data.
+
 Copyright (C) 2026 DigiPen Institute of Technology.
 Reproduction or disclosure of this file or its contents without the
 prior written consent of DigiPen Institute of Technology is prohibited.
