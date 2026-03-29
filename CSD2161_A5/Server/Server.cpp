@@ -2,16 +2,24 @@
 \file   Server.cpp
 \author Rachael Chia (c.weixuanrachael@digipen.edu)
 \author Ban Kai Wei Benjamin (k.ban@digipen.edu)
-\date   03/12/2026
+\author Fam Qian Wei jonathan (fam.q@digipen.edu)
+\author Zong Han Law (zonghan.law@digipen.edu)
+\author Raziq
+
+\date   03/28/2026
 \par Course: CSD2161
-\par Assignment: Assignment 4
-\brief  This project implements a file download system using:
-		- TCP for control messages
-		- UDP for actual file transfer
+\par Assignment: Assignment 5
+\brief  This file is the Server-side implementation of a TCP LAN 
+		online trading platform.
+
+        Manages connected clients, processes trading commands, updates
+        portfolios and market prices, and persists user/trade data.
+		
 Copyright (C) 2026 DigiPen Institute of Technology.
 Reproduction or disclosure of this file or its contents without the
 prior written consent of DigiPen Institute of Technology is prohibited.
 *******************************************************************************/
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -197,9 +205,10 @@ void SaveDatabase()
 	}
 }
 
+//Logging into the application
 void Login(SOCKET sock, std::string const& UserName)
 {
-	// only 1 client can assess database at a time :P
+	// only 1 client can assess database at a time
 	std::lock_guard<std::mutex> lock(UsersMutex);
 	Portfolio p;
 
@@ -217,7 +226,7 @@ void Login(SOCKET sock, std::string const& UserName)
 		sendExact(sock, (char*)&balanceNet, 4);
 	}
 
-	// its a new users, gib 10k 
+	// its a new users, assigned cash value of 10k 
 	else
 	{
 		Database[UserName].Cash = 10000;
@@ -780,6 +789,7 @@ int main()
 	return 0;
 }
 
+// Handles one connected client's full session: login, command processing, and cleanup on disconnect.
 bool execute(SOCKET clientSocket)
 {
 	// Get clients ip address and port number from socket
@@ -939,6 +949,7 @@ bool execute(SOCKET clientSocket)
 	return true;
 }
 
+//disconnect the socket
 void disconnect(SOCKET& listenerSocket)
 {
 	if (listenerSocket != INVALID_SOCKET)
@@ -949,6 +960,7 @@ void disconnect(SOCKET& listenerSocket)
 	}
 }
 
+//prints the machine's local IP addresses
 void GetLocalIPAddresses()
 {
 	char hostname[256];
