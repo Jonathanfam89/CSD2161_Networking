@@ -39,6 +39,9 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #include <iomanip>
 #include <unordered_map>
 #include <deque>
+#include <cfloat>
+#include <chrono>
+#include <ctime>
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "imgui/imgui.h"
@@ -56,7 +59,9 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 
-// ── Protocol Command IDs ────────────────────────────────────────────────────
+#include "ClientUI.h"
+
+//  Protocol Command IDs 
 enum CMDID : unsigned char {
     UNKNOWN          = 0x00,
     REQ_QUIT         = 0x01,
@@ -78,26 +83,7 @@ enum CMDID : unsigned char {
     ECHO_ERROR       = 0x30
 };
 
-// ── Shared Application State ────────────────────────────────────────────────
-struct StockInfo {
-    std::string symbol;
-    int         quantity;
-    int         bid;
-    int         ask;
-};
-
-struct HoldingInfo {
-    std::string symbol;
-    int         quantity;
-    int         cost;
-};
-
-struct LogEntry {
-    std::string message;
-    ImVec4      color;
-};
-
-// Global shared state
+//  Global shared state 
 std::mutex              g_stateMutex;
 volatile bool           g_running       = true;
 bool                    g_connected     = false;
@@ -108,15 +94,18 @@ std::vector<HoldingInfo>g_portfolio;
 std::string             g_tradeHistory;
 std::deque<LogEntry>    g_log;
 SOCKET                  g_tcpSock       = INVALID_SOCKET;
+std::unordered_map<std::string, PriceHistory>  g_priceHistory;
+std::unordered_map<std::string, GraphViewState> g_graphViews;
+bool g_historySeeded = false;
 
-void AddLog(const std::string& msg, ImVec4 color = ImVec4(1, 1, 1, 1))
+void AddLog(const std::string& msg, ImVec4 color)
 {
     std::lock_guard<std::mutex> lk(g_stateMutex);
     g_log.push_back({msg, color});
     if (g_log.size() > 200) g_log.pop_front();
 }
 
-// ── Network Helpers ─────────────────────────────────────────────────────────
+//  Network Helpers 
 int recvAll(SOCKET sock, char* buffer, int length)
 {
     int total = 0;
@@ -139,7 +128,7 @@ bool sendExact(SOCKET sock, const char* buffer, int length)
     return true;
 }
 
-// ── Network Send Commands ───────────────────────────────────────────────────
+//  Network Send Commands 
 void SendLogin(const std::string& username)
 {
     unsigned char cmd = REQ_LOGIN;
@@ -196,7 +185,105 @@ void SendQuit()
     g_running = false;
 }
 
-// ── Receiver Thread ─────────────────────────────────────────────────────────
+// Reconstruct price history from trade history text + current market prices.
+// Trade line format: "2026-03-30 14:23:01 user BUY/SELL SYMBOL qty @ price (total: N)"
+void ReconstructPriceHistory()
+{
+    // Must be called with g_stateMutex held
+    struct TradeEntry {
+        double      timestamp;
+        std::string symbol;
+        bool        isBuy; // true = BUY, false = SELL
+    };
+
+    std::vector<TradeEntry> trades;
+    std::istringstream iss(g_tradeHistory);
+    std::string line;
+
+    while (std::getline(iss, line)) {
+        if (line.empty()) continue;
+        std::istringstream ls(line);
+        std::string date, timeStr, user, action, symbol;
+        if (!(ls >> date >> timeStr >> user >> action >> symbol)) continue;
+
+        // Parse timestamp "YYYY-MM-DD HH:MM:SS"
+        struct tm tmBuf = {};
+        if (sscanf(date.c_str(), "%d-%d-%d", &tmBuf.tm_year, &tmBuf.tm_mon, &tmBuf.tm_mday) != 3)
+            continue;
+        tmBuf.tm_year -= 1900;
+        tmBuf.tm_mon -= 1;
+        if (sscanf(timeStr.c_str(), "%d:%d:%d", &tmBuf.tm_hour, &tmBuf.tm_min, &tmBuf.tm_sec) != 3)
+            continue;
+        tmBuf.tm_isdst = -1;
+        time_t t = mktime(&tmBuf);
+        if (t == -1) continue;
+        double ts = (double)t;
+
+        bool isBuy = (action == "BUY");
+        if (action != "BUY" && action != "SELL") continue;
+
+        trades.push_back({ts, symbol, isBuy});
+    }
+
+    if (trades.empty()) return;
+
+    // Count net trades per symbol (buys - sells) to compute initial prices
+    std::unordered_map<std::string, int> netTrades;
+    for (auto& tr : trades)
+        netTrades[tr.symbol] += tr.isBuy ? 1 : -1;
+
+    // Compute initial bid/ask = current - net_trades (since each trade moves price by $1)
+    struct PriceState { int bid; int ask; };
+    std::unordered_map<std::string, PriceState> prices;
+    for (auto& s : g_market) {
+        int net = netTrades.count(s.symbol) ? netTrades[s.symbol] : 0;
+        prices[s.symbol] = { s.bid - net, s.ask - net };
+    }
+
+    // Clear existing price history
+    g_priceHistory.clear();
+
+    // Record initial state at the timestamp of the first trade
+    for (auto& [sym, ps] : prices) {
+        auto& ph = g_priceHistory[sym];
+        ph.bidHistory.push_back((float)(std::max)(1, ps.bid));
+        ph.askHistory.push_back((float)(std::max)(1, ps.ask));
+        ph.timestamps.push_back(trades.front().timestamp - 1.0);
+    }
+
+    // Walk forward through trades, recording price after each trade
+    for (auto& tr : trades) {
+        auto pit = prices.find(tr.symbol);
+        if (pit == prices.end()) continue;
+
+        if (tr.isBuy) {
+            pit->second.bid = (std::max)(1, pit->second.bid + 1);
+            pit->second.ask = (std::max)(1, pit->second.ask + 1);
+        } else {
+            pit->second.bid = (std::max)(1, pit->second.bid - 1);
+            pit->second.ask = (std::max)(1, pit->second.ask - 1);
+        }
+
+        auto& ph = g_priceHistory[tr.symbol];
+        ph.bidHistory.push_back((float)pit->second.bid);
+        ph.askHistory.push_back((float)pit->second.ask);
+        ph.timestamps.push_back(tr.timestamp);
+    }
+
+    // For stocks with no trades, seed with current prices
+    double now = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    for (auto& s : g_market) {
+        auto& ph = g_priceHistory[s.symbol];
+        if (ph.timestamps.empty()) {
+            ph.bidHistory.push_back((float)s.bid);
+            ph.askHistory.push_back((float)s.ask);
+            ph.timestamps.push_back(now);
+        }
+    }
+}
+
+//  Receiver Thread
 void receiverThread()
 {
     while (g_running)
@@ -221,6 +308,9 @@ void receiverThread()
             }
             AddLog("Login successful! Balance: $" + std::to_string(balance),
                    ImVec4(0.3f, 1, 0.3f, 1));
+
+            SendPortfolioRequest();
+            SendHistoryRequest();
         }
         else if (cmdID == RSP_MARKET || cmdID == RSP_MARKETUPDATE)
         {
@@ -248,6 +338,10 @@ void receiverThread()
 
             std::lock_guard<std::mutex> lk(g_stateMutex);
             g_market = newMarket;
+
+            // Refresh history when other clients trade
+            if (cmdID == RSP_MARKETUPDATE)
+                SendHistoryRequest();
         }
         else if (cmdID == RSP_BUY)
         {
@@ -275,6 +369,7 @@ void receiverThread()
                    ImVec4(0.3f, 1, 0.3f, 1));
 
             SendPortfolioRequest();
+            SendHistoryRequest();
         }
         else if (cmdID == RSP_SELL)
         {
@@ -302,6 +397,7 @@ void receiverThread()
                    ImVec4(1, 0.8f, 0.3f, 1));
 
             SendPortfolioRequest();
+            SendHistoryRequest();
         }
         else if (cmdID == RSP_PORTFOLIO)
         {
@@ -344,6 +440,10 @@ void receiverThread()
 
             std::lock_guard<std::mutex> lk(g_stateMutex);
             g_tradeHistory = history;
+            if (!g_historySeeded) {
+                ReconstructPriceHistory();
+                g_historySeeded = true;
+            }
         }
         else if (cmdID == RSP_ERROR)
         {
@@ -358,7 +458,7 @@ void receiverThread()
     }
 }
 
-// ── DirectX 11 Globals ─────────────────────────────────────────────────────
+//  DirectX 11 Globals 
 static ID3D11Device*           g_pd3dDevice           = nullptr;
 static ID3D11DeviceContext*    g_pd3dDeviceContext     = nullptr;
 static IDXGISwapChain*         g_pSwapChain           = nullptr;
@@ -373,7 +473,7 @@ void CreateRenderTarget();
 void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-// ── Console entry point for Debug builds ────────────────────────────────────
+//  Console entry point for Debug builds 
 #ifdef _DEBUG
 int main()
 {
@@ -381,7 +481,7 @@ int main()
 }
 #endif
 
-// ── Main ────────────────────────────────────────────────────────────────────
+//  Main 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 {
     // Init Winsock
@@ -416,7 +516,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
 
-    // Customize style
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 6.0f;
     style.FrameRounding = 4.0f;
@@ -428,16 +527,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
-    // UI state
-    char serverIP[64]   = "127.0.0.1";
-    char serverPort[16] = "8888";
-    char username[64]   = "";
-    char buySymbol[16]  = "";
-    int  buyQty         = 1;
-    char sellSymbol[16] = "";
-    int  sellQty        = 1;
+    UIState ui;
     std::thread receiverThr;
     ImVec4 clearColor = ImVec4(0.06f, 0.06f, 0.1f, 1.0f);
+    double lastGraphRecord = 0.0;
 
     // Main loop
     MSG msg;
@@ -448,6 +541,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             TranslateMessage(&msg);
             DispatchMessage(&msg);
             continue;
+        }
+
+        // Record price history every 1 second
+        if (g_loggedIn) {
+            double now = std::chrono::duration<double>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            if (now - lastGraphRecord >= 1.0) {
+                lastGraphRecord = now;
+                std::lock_guard<std::mutex> lk(g_stateMutex);
+                for (auto& s : g_market) {
+                    auto& ph = g_priceHistory[s.symbol];
+                    ph.bidHistory.push_back((float)s.bid);
+                    ph.askHistory.push_back((float)s.ask);
+                    ph.timestamps.push_back(now);
+                    if ((int)ph.bidHistory.size() > MAX_HISTORY_POINTS) {
+                        ph.bidHistory.erase(ph.bidHistory.begin());
+                        ph.askHistory.erase(ph.askHistory.begin());
+                        ph.timestamps.erase(ph.timestamps.begin());
+                    }
+                }
+            }
         }
 
         // Handle resize
@@ -464,244 +578,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // ── LOGIN SCREEN ────────────────────────────────────────────────
-        if (!g_connected)
-        {
-            ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f,
-                                           io.DisplaySize.y * 0.5f),
-                                    ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-            ImGui::SetNextWindowSize(ImVec2(400, 220));
-            ImGui::Begin("Connect to Server", nullptr,
-                         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
-
-            ImGui::Text("Online Trading Platform");
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            ImGui::InputText("Server IP", serverIP, sizeof(serverIP));
-            ImGui::InputText("Port", serverPort, sizeof(serverPort));
-            ImGui::InputText("Username", username, sizeof(username));
-
-            ImGui::Spacing();
-            if (ImGui::Button("Connect & Login", ImVec2(-1, 30)))
-            {
-                if (strlen(username) > 0)
-                {
-                    g_tcpSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-                    sockaddr_in srvAddr{};
-                    srvAddr.sin_family = AF_INET;
-                    srvAddr.sin_port = htons((u_short)atoi(serverPort));
-                    inet_pton(AF_INET, serverIP, &srvAddr.sin_addr);
-
-                    if (connect(g_tcpSock, (sockaddr*)&srvAddr, sizeof(srvAddr))
-                        == SOCKET_ERROR)
-                    {
-                        AddLog("Connection failed: " +
-                               std::to_string(WSAGetLastError()),
-                               ImVec4(1, 0.3f, 0.3f, 1));
-                        closesocket(g_tcpSock);
-                        g_tcpSock = INVALID_SOCKET;
-                    }
-                    else
-                    {
-                        g_connected = true;
-                        g_running = true;
-                        SendLogin(username);
-                        receiverThr = std::thread(receiverThread);
-                    }
-                }
+        // Render UI
+        if (!g_connected) {
+            if (RenderLoginScreen(ui, io)) {
+                receiverThr = std::thread(receiverThread);
             }
-
-            // Show connection errors
-            {
-                std::lock_guard<std::mutex> lk(g_stateMutex);
-                for (auto& entry : g_log) {
-                    ImGui::TextColored(entry.color, "%s", entry.message.c_str());
-                }
-            }
-
-            ImGui::End();
-        }
-        // ── MAIN TRADING UI ─────────────────────────────────────────────
-        else
-        {
-            float panelW = io.DisplaySize.x;
-            float panelH = io.DisplaySize.y;
-
-            // ── Top Bar ─────────────────────────────────────────────────
-            ImGui::SetNextWindowPos(ImVec2(0, 0));
-            ImGui::SetNextWindowSize(ImVec2(panelW, 40));
-            ImGui::Begin("##TopBar", nullptr,
-                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
-            {
-                std::lock_guard<std::mutex> lk(g_stateMutex);
-                ImGui::Text("User: %s", username);
-                ImGui::SameLine(200);
-                ImGui::Text("Cash: $%d", g_cash);
-            }
-            ImGui::SameLine(panelW - 120);
-            if (ImGui::Button("Disconnect")) {
-                SendQuit();
-            }
-            ImGui::End();
-
-            float contentTop = 40;
-            float leftW = panelW * 0.55f;
-            float rightW = panelW - leftW;
-            float marketH = (panelH - contentTop) * 0.55f;
-            float logH = (panelH - contentTop) - marketH;
-
-            // ── Market Data ─────────────────────────────────────────────
-            ImGui::SetNextWindowPos(ImVec2(0, contentTop));
-            ImGui::SetNextWindowSize(ImVec2(leftW, marketH));
-            ImGui::Begin("Market", nullptr,
-                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-                ImGuiWindowFlags_NoCollapse);
-
-            if (ImGui::Button("Refresh")) SendMarketRequest();
-
-            if (ImGui::BeginTable("MarketTable", 4,
-                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                    ImGuiTableFlags_Resizable))
-            {
-                ImGui::TableSetupColumn("Symbol", ImGuiTableColumnFlags_WidthFixed, 80);
-                ImGui::TableSetupColumn("Available", ImGuiTableColumnFlags_WidthFixed, 80);
-                ImGui::TableSetupColumn("Bid", ImGuiTableColumnFlags_WidthFixed, 80);
-                ImGui::TableSetupColumn("Ask", ImGuiTableColumnFlags_WidthFixed, 80);
-                ImGui::TableHeadersRow();
-
-                std::lock_guard<std::mutex> lk(g_stateMutex);
-                for (auto& s : g_market)
-                {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn(); ImGui::Text("%s", s.symbol.c_str());
-                    ImGui::TableNextColumn(); ImGui::Text("%d", s.quantity);
-                    ImGui::TableNextColumn();
-                    ImGui::TextColored(ImVec4(0.3f, 1, 0.3f, 1), "$%d", s.bid);
-                    ImGui::TableNextColumn();
-                    ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "$%d", s.ask);
-                }
-                ImGui::EndTable();
-            }
-            ImGui::End();
-
-            // ── Activity Log ────────────────────────────────────────────
-            ImGui::SetNextWindowPos(ImVec2(0, contentTop + marketH));
-            ImGui::SetNextWindowSize(ImVec2(leftW, logH));
-            ImGui::Begin("Activity Log", nullptr,
-                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-                ImGuiWindowFlags_NoCollapse);
-            {
-                std::lock_guard<std::mutex> lk(g_stateMutex);
-                for (auto& entry : g_log) {
-                    ImGui::TextColored(entry.color, "%s", entry.message.c_str());
-                }
-                if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
-                    ImGui::SetScrollHereY(1.0f);
-            }
-            ImGui::End();
-
-            // ── Right Panel: Portfolio + Trading ────────────────────────
-            float rightPanelH = panelH - contentTop;
-            ImGui::SetNextWindowPos(ImVec2(leftW, contentTop));
-            ImGui::SetNextWindowSize(ImVec2(rightW, rightPanelH));
-            ImGui::Begin("Trading", nullptr,
-                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-                ImGuiWindowFlags_NoCollapse);
-
-            // ── Portfolio Section ────────────────────────────────────
-            if (ImGui::CollapsingHeader("Portfolio",
-                    ImGuiTreeNodeFlags_DefaultOpen))
-            {
-                if (ImGui::Button("Refresh Portfolio")) SendPortfolioRequest();
-
-                std::lock_guard<std::mutex> lk(g_stateMutex);
-                ImGui::Text("Cash: $%d", g_cash);
-
-                if (!g_portfolio.empty() &&
-                    ImGui::BeginTable("PortTable", 3,
-                        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
-                {
-                    ImGui::TableSetupColumn("Symbol");
-                    ImGui::TableSetupColumn("Qty");
-                    ImGui::TableSetupColumn("Avg Cost");
-                    ImGui::TableHeadersRow();
-
-                    for (auto& h : g_portfolio) {
-                        ImGui::TableNextRow();
-                        ImGui::TableNextColumn(); ImGui::Text("%s", h.symbol.c_str());
-                        ImGui::TableNextColumn(); ImGui::Text("%d", h.quantity);
-                        ImGui::TableNextColumn(); ImGui::Text("$%d", h.cost);
-                    }
-                    ImGui::EndTable();
-                }
-                else if (g_portfolio.empty()) {
-                    ImGui::TextDisabled("(No holdings)");
-                }
-            }
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            // ── Buy Section ─────────────────────────────────────────
-            if (ImGui::CollapsingHeader("Buy Stocks",
-                    ImGuiTreeNodeFlags_DefaultOpen))
-            {
-                ImGui::PushID("buy");
-                ImGui::InputText("Symbol", buySymbol, sizeof(buySymbol));
-                ImGui::InputInt("Quantity", &buyQty);
-                if (buyQty < 1) buyQty = 1;
-
-                if (ImGui::Button("Buy", ImVec2(-1, 28))) {
-                    if (strlen(buySymbol) > 0) {
-                        SendBuy(buySymbol, buyQty);
-                    }
-                }
-                ImGui::PopID();
-            }
-
-            ImGui::Spacing();
-
-            // ── Sell Section ────────────────────────────────────────
-            if (ImGui::CollapsingHeader("Sell Stocks",
-                    ImGuiTreeNodeFlags_DefaultOpen))
-            {
-                ImGui::PushID("sell");
-                ImGui::InputText("Symbol", sellSymbol, sizeof(sellSymbol));
-                ImGui::InputInt("Quantity", &sellQty);
-                if (sellQty < 1) sellQty = 1;
-
-                if (ImGui::Button("Sell", ImVec2(-1, 28))) {
-                    if (strlen(sellSymbol) > 0) {
-                        SendSell(sellSymbol, sellQty);
-                    }
-                }
-                ImGui::PopID();
-            }
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            // ── Trade History ───────────────────────────────────────
-            if (ImGui::CollapsingHeader("Trade History"))
-            {
-                if (ImGui::Button("Load History")) SendHistoryRequest();
-                ImGui::Spacing();
-
-                std::lock_guard<std::mutex> lk(g_stateMutex);
-                if (g_tradeHistory.empty())
-                    ImGui::TextDisabled("(No trades yet)");
-                else
-                    ImGui::TextWrapped("%s", g_tradeHistory.c_str());
-            }
-
-            ImGui::End();
+        } else {
+            RenderTradingUI(ui, io);
         }
 
-        // ── Render ──────────────────────────────────────────────────────
+        // Present
         ImGui::Render();
         const float clear_color[4] = { clearColor.x, clearColor.y,
                                        clearColor.z, clearColor.w };
@@ -709,7 +595,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        g_pSwapChain->Present(1, 0); // vsync
+        g_pSwapChain->Present(1, 0);
 
         if (!g_running) PostMessage(hwnd, WM_CLOSE, 0, 0);
     }
@@ -733,7 +619,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
     return 0;
 }
 
-// ── DirectX 11 Helpers ──────────────────────────────────────────────────────
+//  DirectX 11 Helpers 
 bool CreateDeviceD3D(HWND hWnd)
 {
     DXGI_SWAP_CHAIN_DESC sd = {};

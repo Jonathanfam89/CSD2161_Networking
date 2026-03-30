@@ -1,2 +1,5 @@
-zonghan 9850 AAPL 1 150
-zh 8600 GOOG 5 280
+bot_alice 999999
+bot_bob 999999
+bot_charlie 999999
+bot_dave 999999
+bot_eve 999999
