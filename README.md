@@ -106,6 +106,10 @@ See [`docs/Design_Report.pdf`](docs/Design_Report.pdf) for the full design write
 
 Ban Kai Wei Benjamin · Chia Wei Xuan Rachael · Fam Qian Wei Jonathan · Zong Han Law · Muhammad Raziq
 
+## AI declaration
+
+This project was built with the assistance of AI, specifically [Claude Code](https://claude.com/claude-code) by Anthropic. AI tools helped with writing code, debugging and documentation. The team reviewed, tested and integrated all AI-assisted output and is responsible for the final work.
+
 ## Acknowledgements
 
 - [Dear ImGui](https://github.com/ocornut/imgui), MIT License (`Client/imgui/LICENSE.txt`)
